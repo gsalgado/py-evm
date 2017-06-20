@@ -15,9 +15,6 @@ from eth_utils import (
 from evm.exceptions import (
     InvalidBlock,
 )
-from evm.vm.evm import (
-    MetaEVM,
-)
 from evm.vm.flavors import (
     MainnetEVM,
 )
@@ -46,9 +43,10 @@ BASE_FIXTURE_PATH = os.path.join(ROOT_PROJECT_DIR, 'fixtures', 'BlockchainTests'
 def blockchain_fixture_skip_fn(fixture_path, fixture_name, fixture):
     # TODO: enable all tests
     return (
-        'bcValidBlockTest.json' not in fixture_path or
-        'EIP150' in fixture_path or  # TODO: enable
-        'Homestead' in fixture_path  # TODO: enable
+        'EIP150' in fixture_path or # TODO: enable
+        'EIP150' in fixture_name or # TODO: enable
+        'EIP158' in fixture_path or # TODO: enable
+        'EIP158' in fixture_name  # TODO: enable
     )
 
 
@@ -117,6 +115,7 @@ def test_blockchain_fixtures(fixture_name, fixture):
         'mix_hash': fixture['genesisBlockHeader']['mixHash'],
         'nonce': fixture['genesisBlockHeader']['nonce'],
     }
+    expected_genesis_header = BlockHeader(**genesis_params)
 
     # TODO: find out if this is supposed to pass?
     # if 'genesisRLP' in fixture:
@@ -131,21 +130,7 @@ def test_blockchain_fixtures(fixture_name, fixture):
     genesis_block = meta_evm.get_block_by_number(0)
     genesis_header = genesis_block.header
 
-    assert genesis_header.parent_hash == fixture['genesisBlockHeader']['parentHash']
-    assert genesis_header.uncles_hash == fixture['genesisBlockHeader']['uncleHash']
-    assert genesis_header.coinbase == fixture['genesisBlockHeader']['coinbase']
-    assert genesis_header.state_root == fixture['genesisBlockHeader']['stateRoot']
-    assert genesis_header.transaction_root == fixture['genesisBlockHeader']['transactionsTrie']
-    assert genesis_header.receipt_root == fixture['genesisBlockHeader']['receiptTrie']
-    assert genesis_header.bloom == fixture['genesisBlockHeader']['bloom']
-    assert genesis_header.difficulty == fixture['genesisBlockHeader']['difficulty']
-    assert genesis_header.block_number == fixture['genesisBlockHeader']['number']
-    assert genesis_header.gas_limit == fixture['genesisBlockHeader']['gasLimit']
-    assert genesis_header.gas_used == fixture['genesisBlockHeader']['gasUsed']
-    assert genesis_header.timestamp == fixture['genesisBlockHeader']['timestamp']
-    assert genesis_header.extra_data == fixture['genesisBlockHeader']['extraData']
-    assert genesis_header.mix_hash == fixture['genesisBlockHeader']['mixHash']
-    assert genesis_header.nonce == fixture['genesisBlockHeader']['nonce']
+    assert_rlp_equal(genesis_header, expected_genesis_header)
 
     # 1 - mine the genesis block
     # 2 - loop over blocks:
