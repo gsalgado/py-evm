@@ -78,6 +78,11 @@ class VM(object):
     @block.setter
     def block(self, value):
         self._block = value
+        # XXX: To make it possible to implement Quorum's private transactions
+        # in a minimally invasive way, this would probably have to be
+        # refactored so that a VM can have multiple states? One tricky thing
+        # is the fact that all functions in
+        # evm/vm/flavors/frontier/__init__.py access state_db directly
         self.state_db = State(db=self.db, root_hash=value.header.state_root)
 
     #

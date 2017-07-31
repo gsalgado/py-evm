@@ -284,7 +284,7 @@ class Chain(object):
             b = self.get_block_by_hash(b.header.parent_hash)
 
     def validate_block(self, block):
-        self.validate_seal(block.header)
+        self.validate_header(block.header)
         self.validate_uncles(block)
 
     def validate_uncles(self, block):
@@ -314,9 +314,9 @@ class Chain(object):
                     "Uncle's parent {0} is not an ancestor of {1}".format(
                         encode_hex(uncle.parent_hash), encode_hex(block.hash)))
 
-            self.validate_seal(uncle)
+            self.validate_header(uncle)
 
-    def validate_seal(self, header):
+    def validate_header(self, header):
         check_pow(
             header.block_number, header.mining_hash,
             header.mix_hash, header.nonce, header.difficulty)
