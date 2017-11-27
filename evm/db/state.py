@@ -1,3 +1,4 @@
+import functools
 import logging
 
 import rlp
@@ -35,6 +36,37 @@ from evm.utils.padding import (
 from .hash_trie import HashTrie
 
 
+@functools.lru_cache(128)
+def _get_storage(db, root_hash, address, slot):
+    validate_uint256(slot, title="Storage Slot")
+    storage = _get_account_storage(db, root_hash, address)
+    slot_as_key = pad32(int_to_big_endian(slot))
+    if slot_as_key in storage:
+        encoded_value = storage[slot_as_key]
+        return rlp.decode(encoded_value, sedes=rlp.sedes.big_endian_int)
+    else:
+        return 0
+
+
+@functools.lru_cache(128)
+def _get_account_storage(db, root_hash, address):
+    validate_canonical_address(address, title="Storage Address")
+    account = _get_account(db, root_hash, address)
+    return HashTrie(Trie(db, account.storage_root))
+
+
+@functools.lru_cache(128)
+def _get_account(db, root_hash, address):
+    trie = HashTrie(Trie(db, root_hash))
+    rlp_account = trie[address]
+    if rlp_account:
+        account = rlp.decode(rlp_account, sedes=Account)
+        account._mutable = True
+    else:
+        account = Account()
+    return account
+
+
 class State:
     """
     High level API around account storage.
@@ -45,6 +77,9 @@ class State:
     logger = logging.getLogger('evm.state.State')
 
     def __init__(self, db, root_hash=BLANK_ROOT_HASH, read_only=False):
+        # Keep a reference to the original db instance to make sure we hit the cache in
+        # _get_account() and _get_storage() above.
+        self._unwrapped_db = db
         if read_only:
             self.db = ImmutableDB(db)
         else:
@@ -82,26 +117,7 @@ class State:
         self._set_account(address, account)
 
     def get_storage(self, address, slot):
-        validate_canonical_address(address, title="Storage Address")
-        validate_uint256(slot, title="Storage Slot")
-
-        account = self._get_account(address)
-        storage = HashTrie(Trie(self.db, account.storage_root))
-
-        slot_as_key = pad32(int_to_big_endian(slot))
-
-        if slot_as_key in storage:
-            encoded_value = storage[slot_as_key]
-            return rlp.decode(encoded_value, sedes=rlp.sedes.big_endian_int)
-        else:
-            return 0
-
-    def delete_storage(self, address):
-        validate_canonical_address(address, title="Storage Address")
-
-        account = self._get_account(address)
-        account.storage_root = BLANK_ROOT_HASH
-        self._set_account(address, account)
+        return _get_storage(self._unwrapped_db, self.root_hash, address, slot)
 
     def set_balance(self, address, balance):
         validate_canonical_address(address, title="Storage Address")
@@ -157,12 +173,6 @@ class State:
         account = self._get_account(address)
         return account.code_hash
 
-    def delete_code(self, address):
-        validate_canonical_address(address, title="Storage Address")
-        account = self._get_account(address)
-        account.code_hash = EMPTY_SHA3
-        self._set_account(address, account)
-
     #
     # Account Methods
     #
@@ -208,13 +218,10 @@ class State:
     # Internal
     #
     def _get_account(self, address):
-        rlp_account = self._trie[address]
-        if rlp_account:
-            account = rlp.decode(rlp_account, sedes=Account)
-            account._mutable = True
-        else:
-            account = Account()
-        return account
+        # info = _get_account.cache_info()
+        # self.logger.warn("%s", info._asdict())
+        return _get_account(self._unwrapped_db, self.root_hash, address)
 
     def _set_account(self, address, account):
+        _get_account.cache_clear()
         self._trie[address] = rlp.encode(account, sedes=Account)
