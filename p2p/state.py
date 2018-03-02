@@ -14,9 +14,7 @@ import rlp
 from trie.sync import HexaryTrieSync
 from trie.exceptions import SyncRequestAlreadyProcessed
 
-from eth_keys import datatypes  # noqa: F401
 from eth_utils import (
-    decode_hex,
     encode_hex,
     keccak,
 )
@@ -184,26 +182,23 @@ def _test():
     import signal
     from p2p import ecies
     from p2p.peer import HardCodedNodesPeerPool
-    from evm.chains.ropsten import RopstenChain, ROPSTEN_GENESIS_HEADER
+    from evm.chains.ropsten import RopstenChain
     from evm.db.backends.level import LevelDB
-    from evm.db.backends.memory import MemoryDB
     from tests.p2p.integration_test_helpers import FakeAsyncChainDB
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-db', type=str, required=True)
-    parser.add_argument('-root-hash', type=str, required=True, help='Hex encoded root hash')
     args = parser.parse_args()
 
-    chaindb = FakeAsyncChainDB(MemoryDB())
-    chaindb.persist_header(ROPSTEN_GENESIS_HEADER)
+    db = LevelDB(args.db)
+    chaindb = FakeAsyncChainDB(db)
     peer_pool = HardCodedNodesPeerPool(
         ETHPeer, chaindb, RopstenChain.network_id, ecies.generate_privkey())
     asyncio.ensure_future(peer_pool.run())
 
-    state_db = LevelDB(args.db)
-    root_hash = decode_hex(args.root_hash)
-    downloader = StateDownloader(state_db, root_hash, peer_pool)
+    head = chaindb.get_canonical_head()
+    downloader = StateDownloader(db, head.state_root, peer_pool)
     loop = asyncio.get_event_loop()
 
     for sig in [signal.SIGINT, signal.SIGTERM]:

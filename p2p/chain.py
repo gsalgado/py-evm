@@ -32,6 +32,9 @@ class ChainSyncer(PeerPoolSubscriber):
         self.peer_pool = peer_pool
         self.peer_pool.subscribe(self)
         self.cancel_token = CancelToken('ChainSyncer')
+        # FIXME: turn this into a constant and an arg to __init__
+        self.sync_mode = "fast"
+        self._headers_synced = False
         self._running_peers = set()  # type: Set[ETHPeer]
         self._syncing = False
         self._sync_requests = asyncio.Queue()  # type: asyncio.Queue[ETHPeer]
@@ -86,11 +89,18 @@ class ChainSyncer(PeerPoolSubscriber):
             except OperationCancelled:
                 break
 
+            if self.sync_mode == "fast" and self.header_sync_finished:
+                self.logger.info("TODO")
+                # TODO: wait until there's no more pending bodies/receipts, trigger cancel token
+                # to stop and raise an exception to tell our caller it should perform a state
+                # sync.
+                return
+
             asyncio.ensure_future(self.sync(peer))
 
-            # TODO: If we're in light mode and we've synced up to head - 1024, wait until there's
-            # no more pending bodies/receipts, trigger cancel token to stop and raise an exception
-            # to tell our caller it should perform a state sync.
+    @property
+    def header_sync_finished(self) -> bool:
+        return not self._syncing and self._headers_synced
 
     async def sync(self, peer: ETHPeer) -> None:
         if self._syncing:
@@ -106,6 +116,9 @@ class ChainSyncer(PeerPoolSubscriber):
         self._syncing = True
         try:
             await self._sync(peer)
+            head = await self.chaindb.coro_get_canonical_head()
+            if head.hash == peer.head_hash:
+                self._headers_synced = True
         finally:
             self._syncing = False
 
@@ -147,21 +160,28 @@ class ChainSyncer(PeerPoolSubscriber):
                 self.logger.debug("%s disconnected, stopping sync", peer)
                 break
 
+            headers = cast(List[BlockHeader], headers)
             consecutive_timeouts = 0
-            if headers[-1].block_number <= start_at:
+            last_header = headers[-1]
+            if last_header.block_number <= start_at:
                 self.logger.debug(
                     "Ignoring headers from %d to %d as they've been processed already",
-                    headers[0].block_number, headers[-1].block_number)
+                    headers[0].block_number, last_header.block_number)
                 continue
 
             # TODO: Process headers for consistency.
             for header in headers:
                 await self.chaindb.coro_persist_header(header)
-                start_at = header.block_number
 
             self._body_requests.put_nowait(headers)
             self._receipt_requests.put_nowait(headers)
 
+            if last_header.hash == peer.head_hash:
+                self.logger.info(
+                    "Header sync with %s completed; head hash: %s", peer, last_header.hex_hash)
+                break
+
+            start_at = last_header.block_number
             self.logger.debug("Asking %s for header batch starting at %d", peer, start_at)
             # TODO: Instead of requesting sequential batches from a single peer, request a header
             # skeleton and make concurrent requests, using as many peers as possible, to fill the
