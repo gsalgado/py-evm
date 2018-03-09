@@ -1,8 +1,10 @@
 import asyncio
+from concurrent.futures import ProcessPoolExecutor
 import logging
 import operator
 import time
-from typing import Any, Awaitable, Callable, cast, Dict, List, Set, Tuple  # noqa: F401
+import traceback
+from typing import Any, Awaitable, Callable, cast, Dict, List, Set, Tuple, Union  # noqa: F401
 
 from cytoolz import partition_all
 
@@ -14,6 +16,8 @@ from evm.constants import EMPTY_UNCLE_HASH
 from evm.db.chain import AsyncChainDB
 from evm.db.trie import make_trie_root_and_nodes
 from evm.rlp.headers import BlockHeader
+from evm.rlp.receipts import Receipt
+from evm.rlp.transactions import BaseTransaction
 from p2p import protocol
 from p2p import eth
 from p2p.cancel_token import CancelToken, wait_with_token
@@ -49,6 +53,7 @@ class ChainSyncer(PeerPoolSubscriber):
         self._pending_receipts = {}  # type: Dict[bytes, Tuple[BlockHeader, float]]
         asyncio.ensure_future(self.body_downloader())
         asyncio.ensure_future(self.receipt_downloader())
+        self.executor = ProcessPoolExecutor()
 
     def register_peer(self, peer: BasePeer) -> None:
         asyncio.ensure_future(self.handle_peer(cast(ETHPeer, peer)))
@@ -76,8 +81,9 @@ class ChainSyncer(PeerPoolSubscriber):
 
             try:
                 await self.handle_msg(peer, cmd, msg)
-            except Exception as e:
-                self.logger.error("Unexpected error when processing msg from %s: %s", peer, repr(e))
+            except Exception:
+                self.logger.error("Unexpected error when processing msg from %s: %s",
+                                  peer, traceback.format_exc())
                 break
 
     async def run(self) -> None:
@@ -283,6 +289,7 @@ class ChainSyncer(PeerPoolSubscriber):
 
     async def handle_msg(self, peer: ETHPeer, cmd: protocol.Command,
                          msg: protocol._DecodedMsgType) -> None:
+        loop = asyncio.get_event_loop()
         if isinstance(cmd, eth.BlockHeaders):
             msg = cast(List[BlockHeader], msg)
             self.logger.debug(
@@ -291,8 +298,11 @@ class ChainSyncer(PeerPoolSubscriber):
         elif isinstance(cmd, eth.BlockBodies):
             msg = cast(List[eth.BlockBody], msg)
             self.logger.debug("Got %d BlockBodies", len(msg))
-            for body in msg:
-                tx_root, trie_dict_data = make_trie_root_and_nodes(body.transactions)
+            transactions_tries = await loop.run_in_executor(
+                self.executor, _make_data_trie, [body.transactions for body in msg])
+            for i in range(len(msg)):
+                body = msg[i]
+                tx_root, trie_dict_data = transactions_tries[i]
                 await self.chaindb.coro_persist_trie_data_dict(trie_dict_data)
                 # TODO: Add transactions to canonical chain; blocked by
                 # https://github.com/ethereum/py-evm/issues/337
@@ -301,8 +311,9 @@ class ChainSyncer(PeerPoolSubscriber):
         elif isinstance(cmd, eth.Receipts):
             msg = cast(List[List[eth.Receipt]], msg)
             self.logger.debug("Got Receipts for %d blocks", len(msg))
-            for block_receipts in msg:
-                receipt_root, trie_dict_data = make_trie_root_and_nodes(block_receipts)
+            receipts_tries = await loop.run_in_executor(
+                self.executor, _make_data_trie, msg)
+            for receipt_root, trie_dict_data in receipts_tries:
                 if receipt_root not in self._pending_receipts:
                     self.logger.warning(
                         "Got unexpected receipt root: %s",
@@ -332,6 +343,15 @@ class ChainSyncer(PeerPoolSubscriber):
             self.logger.warn("Got unexpected msg: %s (%s)", cmd, msg)
 
 
+def _make_data_trie(items: List[List[Union[BaseTransaction, Receipt]]]
+                    ) -> List[Tuple[bytes, Dict[Any, Any]]]:
+    trie_data_list = []
+    for item in items:
+        trie_root, trie_dict_data = make_trie_root_and_nodes(item)
+        trie_data_list.append((trie_root, trie_dict_data))
+    return trie_data_list
+
+
 def _test() -> None:
     import argparse
     import signal
@@ -343,7 +363,7 @@ def _test() -> None:
     from evm.db.backends.level import LevelDB
     from tests.p2p.integration_test_helpers import FakeAsyncChainDB, LocalGethPeerPool
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-    logging.getLogger('p2p.chain.ChainSyncer').setLevel(logging.DEBUG)
+    logging.getLogger('p2p.chain.ChainSyncer').setLevel(logging.INFO)
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-db', type=str, required=True)
@@ -355,6 +375,9 @@ def _test() -> None:
     chaindb.persist_header(ROPSTEN_GENESIS_HEADER)
     privkey = ecies.generate_privkey()
     if args.local_geth:
+        # from p2p.peer import HardCodedNodesPeerPool
+        # peer_pool = HardCodedNodesPeerPool(ETHPeer, chaindb, RopstenChain.network_id, privkey)
+        # peer_pool.min_peers = 4
         peer_pool = LocalGethPeerPool(ETHPeer, chaindb, RopstenChain.network_id, privkey)
         discovery = None
     else:
