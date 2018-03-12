@@ -365,9 +365,10 @@ def _test() -> None:
     from p2p.discovery import DiscoveryProtocol
     from evm.chains.ropsten import RopstenChain, ROPSTEN_GENESIS_HEADER
     from evm.db.backends.level import LevelDB
-    from tests.p2p.integration_test_helpers import FakeAsyncChainDB, LocalGethPeerPool
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-    logging.getLogger('p2p.chain.ChainSyncer').setLevel(logging.INFO)
+    from tests.p2p.integration_test_helpers import FakeAsyncChainDB
+    logging.basicConfig(
+        level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s', datefmt='%H:%M:%S')
+    logging.getLogger('p2p.chain.ChainSyncer').setLevel(logging.DEBUG)
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-db', type=str, required=True)
@@ -379,10 +380,11 @@ def _test() -> None:
     chaindb.persist_header(ROPSTEN_GENESIS_HEADER)
     privkey = ecies.generate_privkey()
     if args.local_geth:
-        # from p2p.peer import HardCodedNodesPeerPool
-        # peer_pool = HardCodedNodesPeerPool(ETHPeer, chaindb, RopstenChain.network_id, privkey)
-        # peer_pool.min_peers = 4
-        peer_pool = LocalGethPeerPool(ETHPeer, chaindb, RopstenChain.network_id, privkey)
+        from p2p.peer import HardCodedNodesPeerPool
+        peer_pool = HardCodedNodesPeerPool(ETHPeer, chaindb, RopstenChain.network_id, privkey)
+        peer_pool.min_peers = 4
+        # from tests.p2p.integration_test_helpers import LocalGethPeerPool
+        # peer_pool = LocalGethPeerPool(ETHPeer, chaindb, RopstenChain.network_id, privkey)
         discovery = None
     else:
         listen_host = '0.0.0.0'
