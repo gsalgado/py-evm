@@ -79,12 +79,23 @@ class ChainSyncer(PeerPoolSubscriber):
                 self.logger.debug(
                     "Read %s msg from %s's queue; %d msgs pending", cmd, peer, pending_msgs)
 
-            try:
-                await self.handle_msg(peer, cmd, msg)
-            except Exception:
-                self.logger.error("Unexpected error when processing msg from %s: %s",
-                                  peer, traceback.format_exc())
-                break
+            # Our handle_msg() method runs cpu-intensive tasks in sub-processes so that the main
+            # loop can keep processing msgs, and that's why we use ensure_future() instead of
+            # awaiting for it to finish here.
+            asyncio.ensure_future(self.handle_msg(peer, cmd, msg))
+
+    async def handle_msg(self, peer: ETHPeer, cmd: protocol.Command,
+                         msg: protocol._DecodedMsgType) -> None:
+        try:
+            await self._handle_msg(peer, cmd, msg)
+        except OperationCancelled:
+            # Silently swallow OperationCancelled exceptions because we run unsupervised (i.e.
+            # with ensure_future()). Our caller will also get an OperationCancelled anyway, and
+            # there it will be handled.
+            pass
+        except Exception:
+            self.logger.error("Unexpected error when processing msg from %s: %s",
+                              peer, traceback.format_exc())
 
     async def run(self) -> None:
         while True:
@@ -288,8 +299,8 @@ class ChainSyncer(PeerPoolSubscriber):
         self.peer_pool.unsubscribe(self)
         await self.wait_until_finished()
 
-    async def handle_msg(self, peer: ETHPeer, cmd: protocol.Command,
-                         msg: protocol._DecodedMsgType) -> None:
+    async def _handle_msg(self, peer: ETHPeer, cmd: protocol.Command,
+                          msg: protocol._DecodedMsgType) -> None:
         loop = asyncio.get_event_loop()
         if isinstance(cmd, eth.BlockHeaders):
             msg = cast(List[BlockHeader], msg)
