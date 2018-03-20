@@ -3,6 +3,9 @@ import functools
 
 from typing import Callable, Any
 
+from evm.constants import (
+    BLANK_ROOT_HASH,
+)
 
 # Typeshed definitions for multiprocessing.managers is incomplete, so ignore them for now:
 # https://github.com/python/typeshed/blob/85a788dbcaa5e9e9a62e55f15d44530cd28ba830/stdlib/3/multiprocessing/managers.pyi#L3
@@ -15,6 +18,7 @@ def async_method(method_name: str) -> Callable[..., Any]:
     async def method(self, *args, **kwargs):
         loop = asyncio.get_event_loop()
 
+        # XXX: Why do we run_in_executor() here?
         return await loop.run_in_executor(
             None,
             functools.partial(self._callmethod, kwds=kwargs),
@@ -31,6 +35,8 @@ def sync_method(method_name: str) -> Callable[..., Any]:
 
 
 class ChainDBProxy(BaseProxy):
+    # XXX: Hack! Wouldn't be needed if I used BLANK_ROOT_HASH in ChainSyncer
+    empty_root_hash = BLANK_ROOT_HASH
     coro_get_block_header_by_hash = async_method('get_block_header_by_hash')
     coro_get_canonical_head = async_method('get_canonical_head')
     coro_get_score = async_method('get_score')
