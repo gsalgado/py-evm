@@ -26,6 +26,8 @@ from p2p.peer import BasePeer, ETHPeer, PeerPool, PeerPoolSubscriber
 
 class ChainSyncer(PeerPoolSubscriber):
     logger = logging.getLogger("p2p.chain.ChainSyncer")
+    # XXX: Quick hack, not to be merged.
+    logger.setLevel(logging.DEBUG)
     # We'll only sync if we are connected to at least min_peers_to_sync.
     min_peers_to_sync = 2
     # TODO: Instead of a fixed timeout, we should use a variable one that gets adjusted based on

@@ -13,7 +13,7 @@ from evm.chains.ropsten import (
     ROPSTEN_NETWORK_ID,
 )
 from evm.db.backends.base import BaseDB
-from evm.db.chain import ChainDB
+from evm.db.chain import ChainDB, NonJournaledAsyncChainDB
 from evm.exceptions import CanonicalHeadNotFound
 
 from p2p import ecies
@@ -128,7 +128,6 @@ def get_chain_protocol_class(chain_config: ChainConfig, sync_mode: str) -> Type[
 
 
 def serve_chaindb(db: BaseDB, ipc_path: str) -> None:
-    chaindb = ChainDB(db)
 
     class DBManager(BaseManager):
         pass
@@ -137,7 +136,10 @@ def serve_chaindb(db: BaseDB, ipc_path: str) -> None:
     # https://github.com/python/typeshed/blob/85a788dbcaa5e9e9a62e55f15d44530cd28ba830/stdlib/3/multiprocessing/managers.pyi#L3
     DBManager.register('get_db', callable=lambda: db, proxytype=DBProxy)  # type: ignore
     DBManager.register(  # type: ignore
-        'get_chaindb', callable=lambda: chaindb, proxytype=ChainDBProxy)
+        'get_chaindb', callable=lambda: ChainDB(db), proxytype=ChainDBProxy)
+    DBManager.register(  # type: ignore
+        'get_nonjournaled_chaindb',
+        callable=lambda: NonJournaledAsyncChainDB(db), proxytype=ChainDBProxy)
 
     manager = DBManager(address=ipc_path)  # type: ignore
     server = manager.get_server()  # type: ignore

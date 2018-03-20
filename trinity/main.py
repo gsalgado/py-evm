@@ -1,4 +1,6 @@
 import asyncio
+from concurrent.futures import ProcessPoolExecutor
+import logging
 from multiprocessing.managers import (
     BaseManager,
 )
@@ -14,7 +16,9 @@ from evm.chains.ropsten import (
     ROPSTEN_NETWORK_ID,
 )
 
+from p2p.chain import ChainSyncer
 from p2p.peer import (
+    ETHPeer,
     LESPeer,
     HardCodedNodesPeerPool,
 )
@@ -31,7 +35,7 @@ from trinity.console import (
     console,
 )
 from trinity.constants import (
-    SYNC_LIGHT,
+    SYNC_FULL,
 )
 from trinity.db.chain import ChainDBProxy
 from trinity.db.base import DBProxy
@@ -66,17 +70,15 @@ PRECONFIGURED_NETWORKS = {MAINNET_NETWORK_ID, ROPSTEN_NETWORK_ID}
 def main() -> None:
     args = parser.parse_args()
 
-    logger, log_queue, listener = setup_trinity_logging(args.log_level.upper())
+    # FIXME: Need to figure out if there's a way for mypy to infer the types of every attribute of
+    # our args object, because currently it treats them all as Any.
+    log_level = getattr(logging, args.log_level.upper())
+    logger, log_queue, listener = setup_trinity_logging(log_level)
 
     if args.network_id not in PRECONFIGURED_NETWORKS:
         raise NotImplementedError(
             "Unsupported network id: {0}.  Only the ropsten and mainnet "
             "networks are supported.".format(args.network_id)
-        )
-
-    if args.sync_mode != SYNC_LIGHT:
-        raise NotImplementedError(
-            "Only light sync is supported.  Run with `--sync-mode=light` or `--light`"
         )
 
     chain_config = ChainConfig.from_parser_args(args)
@@ -99,6 +101,11 @@ def main() -> None:
     # the local logger.
     listener.start()
 
+    logging_kwargs = {
+        'log_queue': log_queue,
+        'log_level': log_level,
+    }
+
     # First initialize the database process.
     database_server_process = ctx.Process(
         target=run_database_process,
@@ -106,14 +113,17 @@ def main() -> None:
             chain_config,
             LevelDB,
         ),
-        kwargs={'log_queue': log_queue}
+        kwargs=logging_kwargs,
     )
 
-    # For now we just run the light sync against ropsten by default.
+    # XXX: Quick hack to run full sync
+    networking_proc_fn = run_networking_process
+    if args.sync_mode == SYNC_FULL:
+        networking_proc_fn = run_full_sync
     networking_process = ctx.Process(
-        target=run_networking_process,
+        target=networking_proc_fn,
         args=(chain_config, args.sync_mode, pool_class),
-        kwargs={'log_queue': log_queue}
+        kwargs=logging_kwargs,
     )
 
     # start the processes
@@ -186,4 +196,48 @@ def run_networking_process(
             await chain.stop()
 
     loop.run_until_complete(run_chain(chain))
+    loop.close()
+
+
+@with_queued_logging
+def run_full_sync(
+        chain_config: ChainConfig,
+        sync_mode: str,
+        pool_class: Type[HardCodedNodesPeerPool]) -> None:
+
+    class DBManager(BaseManager):
+        pass
+
+    # Typeshed definitions for multiprocessing.managers is incomplete, so ignore them for now:
+    # https://github.com/python/typeshed/blob/85a788dbcaa5e9e9a62e55f15d44530cd28ba830/stdlib/3/multiprocessing/managers.pyi#L3
+    DBManager.register('get_nonjournaled_chaindb', proxytype=ChainDBProxy)  # type: ignore
+
+    manager = DBManager(address=chain_config.database_ipc_path)  # type: ignore
+    manager.connect()  # type: ignore
+
+    chaindb = manager.get_nonjournaled_chaindb()  # type: ignore
+
+    if not is_database_initialized(chaindb):
+        initialize_database(chain_config, chaindb)
+
+    peer_pool = pool_class(ETHPeer, chaindb, chain_config.network_id, chain_config.nodekey)
+    downloader = ChainSyncer(chaindb, peer_pool)
+    downloader.min_peers_to_sync = 1
+
+    loop = asyncio.get_event_loop()
+    # Use a ProcessPoolExecutor as the default so that we can offload cpu-intensive tasks from the
+    # main thread.
+    loop.set_default_executor(ProcessPoolExecutor())
+    for sig in [signal.SIGINT, signal.SIGTERM]:
+        loop.add_signal_handler(sig, downloader.cancel_token.trigger)
+
+    async def run_downloader():
+        try:
+            asyncio.ensure_future(peer_pool.run())
+            await downloader.run()
+        finally:
+            await peer_pool.stop()
+            await downloader.stop()
+
+    loop.run_until_complete(run_downloader())
     loop.close()
