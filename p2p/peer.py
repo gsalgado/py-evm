@@ -868,10 +868,16 @@ def _test():
           -testnet -lightserv 90
     """
     import argparse
+    import cProfile
+    import pstats
     import signal
     from evm.chains.ropsten import RopstenChain, ROPSTEN_GENESIS_HEADER
     from evm.db.backends.memory import MemoryDB
+    from evm.db.backends.level import LevelDB
     from tests.p2p.integration_test_helpers import FakeAsyncHeaderDB
+    from tests.p2p.integration_test_helpers import FakeAsyncChainDB
+    from evm.vm.forks.byzantium.blocks import ByzantiumBlock
+    from evm.vm.forks.byzantium.transactions import ByzantiumTransaction
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s: %(message)s')
 
     # The default remoteid can be used if you pass nodekeyhex as above to geth.
@@ -896,6 +902,50 @@ def _test():
     peer = loop.run_until_complete(
         handshake(remote, ecies.generate_privkey(), peer_class, headerdb, network_id,
                   CancelToken("Peer test")))
+
+    async def get_block(n):
+        nonlocal peer
+        peer = cast(ETHPeer, peer)
+        peer.sub_proto.send_get_block_headers(n, 1)
+        header = None
+        while True:
+            cmd, msg = await peer.read_sub_proto_msg(CancelToken("unused"))
+            if isinstance(cmd, eth.BlockHeaders):
+                header = msg[0]
+                break
+        peer.sub_proto.send_get_block_bodies([header.hash])
+        body = None
+        while True:
+            cmd, msg = await peer.read_sub_proto_msg(CancelToken("unused"))
+            if isinstance(cmd, eth.BlockBodies):
+                body = msg[0]
+                break
+        transactions = [ByzantiumTransaction.from_base_transaction(tx)
+                        for tx in body.transactions]
+        uncles = body.uncles
+        return ByzantiumBlock(header, transactions, uncles)
+
+    profiler = cProfile.Profile()
+
+    # XXX: Quick/dirty hack to fetch blocks from a local geth instance and profile the
+    # chain.import_block() calls.
+    async def import_blocks():
+        db = '/home/salgado/.local/share/trinity/ropsten-pruned/'
+        chaindb = FakeAsyncChainDB(LevelDB(db))
+        chain = RopstenChain(chaindb)
+        while True:
+            head = chaindb.get_canonical_head()
+            n = head.block_number + 1
+            peer.logger.info("Fetching block %d...", n)
+            block = await get_block(head.block_number + 1)
+            peer.logger.info("Importing block %d...", n)
+            profiler.enable()
+            start = time.time()
+            chain.import_block(block)
+            profiler.disable()
+            peer.logger.info(
+                "Done! %d transactions in %f seconds", len(block.transactions),
+                time.time() - start)
 
     async def request_stuff():
         # Request some stuff from ropsten's block 2440319
@@ -925,10 +975,14 @@ def _test():
         loop.stop()
 
     asyncio.ensure_future(exit_on_sigint())
-    asyncio.ensure_future(request_stuff())
+    # asyncio.ensure_future(request_stuff())
     asyncio.ensure_future(peer.run())
     loop.run_forever()
     loop.close()
+
+    stats = pstats.Stats(profiler)
+    stats.dump_stats('block-import-stats.txt')
+    stats.strip_dirs().sort_stats('cumulative').print_stats(50)
 
 
 if __name__ == "__main__":
