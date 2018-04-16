@@ -16,6 +16,9 @@ class MemoryDB(BaseDB):
         else:
             self.kv_store = kv_store
 
+    def snapshot(self) -> Dict[bytes, bytes]:
+        return self.kv_store.copy()
+
     def get(self, key: bytes) -> bytes:
         return self.kv_store[key]
 

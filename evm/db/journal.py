@@ -1,9 +1,5 @@
-from typing import Dict  # noqa: F401
+from typing import Dict, Set  # noqa: F401
 import uuid
-
-from cytoolz import (
-    merge,
-)
 
 from evm.db.backends.base import BaseDB
 from evm.exceptions import ValidationError
@@ -23,9 +19,8 @@ class Journal(object):
         # contains an array of `uuid4` instances
         self.checkpoints = []
         # contains a mapping from all of the `uuid4` in the `checkpoints` array
-        # to a dictionary of key:value pairs wher the `value` is the original
-        # value for the given key at the moment this checkpoint was created.
-        self.journal_data = {}  # type: Dict[uuid.UUID, Dict[bytes, bytes]]
+        # to a set of keys modified since the snapshot was created.
+        self.journal_data = {}  # type: Dict[uuid.UUID, Set[bytes]]
 
     @property
     def latest_id(self):
@@ -35,9 +30,9 @@ class Journal(object):
         return self.checkpoints[-1]
 
     @property
-    def latest(self):
+    def latest(self) -> Set[bytes]:
         """
-        Returns the dictionary of db keys and values for the latest checkpoint.
+        Returns the set of db keys changed since the latest checkpoint.
         """
         return self.journal_data[self.latest_id]
 
@@ -48,9 +43,9 @@ class Journal(object):
         """
         self.journal_data[self.latest_id] = value
 
-    def add(self, key, value):
+    def add(self, key: bytes) -> None:
         """
-        Adds the given key and value to the latest checkpoint.
+        Adds the given key to the latest checkpoint.
         """
         if not self.checkpoints:
             # If no checkpoints exist we don't need to track history.
@@ -59,22 +54,22 @@ class Journal(object):
             # If the key is already in the latest checkpoint we should not
             # overwrite it.
             return
-        self.latest[key] = value
+        self.latest.add(key)
 
-    def create_checkpoint(self):
+    def create_checkpoint(self) -> bytes:
         """
         Creates a new checkpoint.  Checkpoints are referenced by a random uuid4
         to prevent collisions between multiple checkpoints.
         """
         checkpoint_id = uuid.uuid4()
         self.checkpoints.append(checkpoint_id)
-        self.journal_data[checkpoint_id] = {}
+        self.journal_data[checkpoint_id] = set()
         return checkpoint_id
 
-    def pop_checkpoint(self, checkpoint_id):
+    def pop_checkpoint(self, checkpoint_id: bytes) -> Set[bytes]:
         """
         Returns all changes from the given checkpoint.  This includes all of
-        the changes from any subsequent checkpoints, giving precidence to
+        the changes from any subsequent checkpoints, giving precedence to
         earlier checkpoints.
         """
         idx = self.checkpoints.index(checkpoint_id)
@@ -85,28 +80,24 @@ class Journal(object):
 
         # we pull all of the checkpoints *after* the checkpoint we are
         # reverting to and collapse them to a single set of keys that need to
-        # be reverted (giving precidence to earlier checkpoints).
-        revert_data = merge(*(
+        # be reverted.
+        revert_data = set()
+        revert_data.update(*(
             self.journal_data.pop(c_id)
-            for c_id
-            in reversed(checkpoint_ids)
-        ))
+            for c_id in checkpoint_ids))
 
-        return dict(revert_data.items())
+        return revert_data
 
     def commit_checkpoint(self, checkpoint_id):
         """
-        Collapses all changes for the givent checkpoint into the previous
+        Collapses all changes for the given checkpoint into the previous
         checkpoint if it exists.
         """
         changes_to_merge = self.pop_checkpoint(checkpoint_id)
         if self.checkpoints:
             # we only have to merge the changes into the latest checkpoint if
             # there is one.
-            self.latest = merge(
-                changes_to_merge,
-                self.latest,
-            )
+            self.latest = changes_to_merge.union(self.latest)
 
     def __contains__(self, value):
         return value in self.journal_data
@@ -119,7 +110,7 @@ class JournalDB(BaseDB):
     checkpoint.  The journal then keeps track of the original value for any
     keys changed.  Reverting to a checkpoint involves merging the original key
     data from any subsequent checkpoints into the given checkpoint giving
-    precidence earlier checkpoints.  Then the keys from this merged data set
+    precedence earlier checkpoints.  Then the keys from this merged data set
     are reset to their original values.
 
     The added memory footprint for a JournalDB is one key/value stored per
@@ -129,10 +120,12 @@ class JournalDB(BaseDB):
     """
     wrapped_db = None
     journal = None
+    snapshots = None
 
     def __init__(self, wrapped_db):
         self.wrapped_db = wrapped_db
         self.journal = Journal()
+        self.snapshots = {}
 
     def get(self, key):
         return self.wrapped_db.get(key)
@@ -142,14 +135,7 @@ class JournalDB(BaseDB):
         - replacing an existing value
         - setting a value that does not exist
         """
-        try:
-            current_value = self.wrapped_db.get(key)
-        except KeyError:
-            current_value = None
-
-        if current_value != value:
-            # only journal `set` operations that change the value.
-            self.journal.add(key, current_value)
+        self.journal.add(key)
 
         return self.wrapped_db.set(key, value)
 
@@ -157,14 +143,7 @@ class JournalDB(BaseDB):
         return self.wrapped_db.exists(key)
 
     def delete(self, key):
-        try:
-            current_value = self.wrapped_db.get(key)
-        except KeyError:
-            # no state change so skip journaling
-            pass
-        else:
-            self.journal.add(key, current_value)
-
+        self.journal.add(key)
         return self.wrapped_db.delete(key)
 
     #
@@ -183,7 +162,9 @@ class JournalDB(BaseDB):
         """
         Takes a snapshot of the database by creating a checkpoint.
         """
-        return self.journal.create_checkpoint()
+        checkpoint_id = self.journal.create_checkpoint()
+        self.snapshots[checkpoint_id] = self.wrapped_db.snapshot()
+        return checkpoint_id
 
     def revert(self, checkpoint):
         """
@@ -191,17 +172,30 @@ class JournalDB(BaseDB):
         """
         self._validate_checkpoint(checkpoint)
 
-        for key, value in self.journal.pop_checkpoint(checkpoint).items():
+        snapshot = self.snapshots.pop(checkpoint)
+        for key in self.journal.pop_checkpoint(checkpoint):
+            value = snapshot.get(key)
             if value is None:
                 self.wrapped_db.delete(key)
             else:
                 self.wrapped_db.set(key, value)
+        # XXX: Quick hack to handle MemoryDB's snapshots, which are dict() instances
+        if isinstance(snapshot, dict):
+            snapshot.clear()
+        else:
+            snapshot.close()
 
     def commit(self, checkpoint):
         """
         Commits a given checkpoint.
         """
         self._validate_checkpoint(checkpoint)
+        snapshot = self.snapshots.pop(checkpoint)
+        # XXX: Quick hack to handle MemoryDB's snapshots, which are dict() instances
+        if isinstance(snapshot, dict):
+            snapshot.clear()
+        else:
+            snapshot.close()
         self.journal.commit_checkpoint(checkpoint)
 
     def clear(self):
