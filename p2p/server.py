@@ -33,6 +33,7 @@ from p2p.exceptions import (
     DecryptionError,
     HandshakeFailure,
     OperationCancelled,
+    PeerConnectionLost,
 )
 from p2p.kademlia import (
     Address,
@@ -166,10 +167,13 @@ class Server:
 
     async def receive_handshake(
             self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        expected_exceptions = (
+            TimeoutError, PeerConnectionLost, HandshakeFailure, asyncio.IncompleteReadError,
+            ConnectionResetError, BrokenPipeError)
         try:
             await self._receive_handshake(reader, writer)
-        except TimeoutError:
-            self.logger.debug("Timeout waiting for handshake")
+        except expected_exceptions as e:
+            self.logger.debug("Could not complete handshake: %s", e)
         except OperationCancelled:
             pass
         except Exception as e:
