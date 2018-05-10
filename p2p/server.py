@@ -44,9 +44,10 @@ from p2p.peer import (
     ETHPeer,
     PeerPool,
 )
+from p2p.service import BaseService
 
 
-class Server:
+class Server(BaseService):
     """Server listening for incoming connections"""
     logger = logging.getLogger("p2p.server.Server")
     _server = None
@@ -60,7 +61,7 @@ class Server:
                  min_peers: int = DEFAULT_MIN_PEERS,
                  peer_class: Type[BasePeer] = ETHPeer,
                  ) -> None:
-        self.cancel_token = CancelToken('Server')
+        super().__init__(CancelToken('Server'))
         self.chaindb = chaindb
         self.privkey = privkey
         self.server_address = server_address
@@ -140,7 +141,7 @@ class Server:
         self._server.close()
         await self._server.wait_closed()
 
-    async def run(self) -> None:
+    async def _run(self) -> None:
         self.logger.info("Running server...")
         await self._start()
         self.logger.info(
@@ -155,9 +156,8 @@ class Server:
         asyncio.ensure_future(self.peer_pool.run())
         await self.cancel_token.wait()
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         self.logger.info("Closing server...")
-        self.cancel_token.trigger()
         await self.peer_pool.stop()
         await self.discovery.stop()
         await self._close()
@@ -328,17 +328,18 @@ def _test() -> None:
     # try to establish a connection using the pubkey from one of our previous runs, which will
     # result in lots of DecryptionErrors in receive_handshake().
     async def run():
-        try:
-            await server.run()
+        await server.run()
         except OperationCancelled:
             pass
         await server.stop()
 
     for sig in [signal.SIGINT, signal.SIGTERM]:
-        loop.add_signal_handler(sig, server.cancel_token.trigger)
+        loop.add_signal_handler(
+            sig,
+            functools.partial(asyncio.ensure_future, server.stop()))
 
     loop.set_debug(True)
-    loop.run_until_complete(run())
+    loop.run_until_complete(server.run())
     loop.close()
 
 
