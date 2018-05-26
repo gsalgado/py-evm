@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ProcessPoolExecutor
 import logging
 import math
 import operator
@@ -74,6 +75,11 @@ class FastChainSyncer(BaseService, PeerPoolSubscriber):
         # bodies/receipts for a given chain segment.
         self._downloaded_receipts: asyncio.Queue[Tuple[ETHPeer, List[DownloadedBlockPart]]] = asyncio.Queue()  # noqa: E501
         self._downloaded_bodies: asyncio.Queue[Tuple[ETHPeer, List[DownloadedBlockPart]]] = asyncio.Queue()  # noqa: E501
+        # XXX: Instead of 2, should use a function of available cores. Maybe half here and half in
+        # Peer's executor?
+        self._executor = ProcessPoolExecutor()
+        # XXX: Quick hack to debug chain syncing
+        self.logger.setLevel(logging.DEBUG)
 
     def register_peer(self, peer: BasePeer) -> None:
         asyncio.ensure_future(self.handle_peer(cast(ETHPeer, peer)))
@@ -125,6 +131,9 @@ class FastChainSyncer(BaseService, PeerPoolSubscriber):
             # there it will be handled.
             pass
         except unclean_close_exceptions:
+            # FIXME: These exceptions come from AsyncChain[DB] methods; instead of catching them
+            # here we should do so in our coro_* wrappers, and have them re-raise something
+            # meaningful. Or something like that
             self.logger.exception("Unclean exit while handling message from %s", peer)
         except Exception:
             self.logger.exception("Unexpected error when processing msg from %s", peer)
@@ -280,8 +289,14 @@ class FastChainSyncer(BaseService, PeerPoolSubscriber):
         pending_replies = request_func(missing)
         parts: List[DownloadedBlockPart] = []
         while missing:
-            if pending_replies == 0:
-                pending_replies = request_func(missing)
+            # XXX: There's a bug here! request_func will request batches of block parts
+            # to each of our connected peers, but the peers rarely reply with all the items we
+            # requested (see comment above) and when we process the last reply here,
+            # pending_replies is going to be 0 and in the next iteration we'll be stuck here for
+            # _reply_timeout (60) seconds, doing nothing!
+
+            # if pending_replies == 0:
+            #    pending_replies = request_func(missing)
 
             try:
                 peer, received = await wait_with_token(
@@ -310,17 +325,25 @@ class FastChainSyncer(BaseService, PeerPoolSubscriber):
                 for header in missing
                 if key_func(header) not in received_keys
             ]
+
+            if pending_replies == 0 and missing:
+                pending_replies = request_func(missing)
+
         return parts
 
     def _request_block_parts(
             self,
             headers: List[BlockHeader],
             request_func: Callable[[ETHPeer, List[BlockHeader]], None]) -> int:
-        if not self.peer_pool.peers:
+        target_td = self.chaindb.get_score(headers[-1].hash)
+        eligible_peers = [
+            peer for peer in self.peer_pool.peers if peer.head_td >= target_td]
+        if not eligible_peers:
+            # FIXME: Should rename this exception
             raise NoConnectedPeers()
-        length = math.ceil(len(headers) / len(self.peer_pool.peers))
+        length = math.ceil(len(headers) / len(eligible_peers))
         batches = list(partition_all(length, headers))
-        for peer, batch in zip(self.peer_pool.peers, batches):
+        for peer, batch in zip(eligible_peers, batches):
             request_func(cast(ETHPeer, peer), batch)
         return len(batches)
 
@@ -378,7 +401,9 @@ class FastChainSyncer(BaseService, PeerPoolSubscriber):
         elif isinstance(cmd, eth.NewBlock):
             await self._handle_new_block(peer, cast(Dict[str, Any], msg))
         else:
-            self.logger.debug("Ignoring %s msg during fast sync", cmd)
+            # FIXME: Should log, but using TRACE level otherwise there's too much noise.
+            # self.logger.debug("Ignoring %s msg during fast sync", cmd)
+            pass
 
     def _handle_block_headers(self, headers: List[BlockHeader]) -> None:
         if not headers:
@@ -404,7 +429,7 @@ class FastChainSyncer(BaseService, PeerPoolSubscriber):
         loop = asyncio.get_event_loop()
         iterator = map(make_trie_root_and_nodes, receipts_by_block)
         receipts_tries = await wait_with_token(
-            loop.run_in_executor(None, list, iterator),
+            loop.run_in_executor(self._executor, list, iterator),
             token=self.cancel_token)
         downloaded: List[DownloadedBlockPart] = []
         for (receipts, (receipt_root, trie_dict_data)) in zip(receipts_by_block, receipts_tries):
@@ -419,7 +444,7 @@ class FastChainSyncer(BaseService, PeerPoolSubscriber):
         loop = asyncio.get_event_loop()
         iterator = map(make_trie_root_and_nodes, [body.transactions for body in bodies])
         transactions_tries = await wait_with_token(
-            loop.run_in_executor(None, list, iterator),
+            loop.run_in_executor(self._executor, list, iterator),
             token=self.cancel_token)
         downloaded: List[DownloadedBlockPart] = []
         for (body, (tx_root, trie_dict_data)) in zip(bodies, transactions_tries):
@@ -592,7 +617,6 @@ def _is_receipts_empty(header: BlockHeader) -> bool:
 
 def _test() -> None:
     import argparse
-    from concurrent.futures import ProcessPoolExecutor
     import signal
     from p2p import ecies
     from evm.chains.ropsten import RopstenChain, ROPSTEN_GENESIS_HEADER
