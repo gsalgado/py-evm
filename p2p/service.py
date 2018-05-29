@@ -2,9 +2,9 @@ from abc import ABC, abstractmethod
 import asyncio
 from collections import UserList
 import logging
-from typing import Callable, List, Optional
+from typing import Any, Awaitable, Callable, List, Optional
 
-from p2p.cancel_token import CancelToken
+from p2p.cancel_token import CancelToken, wait_with_token
 from p2p.exceptions import OperationCancelled
 
 
@@ -82,6 +82,20 @@ class BaseService(ABC):
             await asyncio.wait_for(self.finished.wait(), timeout=self._wait_until_finished_timeout)
         except asyncio.futures.TimeoutError:
             self.logger.info("Timed out waiting for %s to finish, exiting anyway", self)
+
+    async def _trigger_token_when_finished(self, token: CancelToken) -> None:
+        await self.finished.wait()
+        token.trigger()
+
+    # XXX: Maybe should raise a different exception when finished is set?
+    async def wait_unless_finished(self, future: Awaitable, token: CancelToken) -> Any:
+        """Wait indefinitely for the given future, unless self.finished gets set.
+
+        If self.finished gets set or the given token is triggered, raise OperationCancelled.
+        """
+        local_token = token.chain(CancelToken("wait_unless_finished"))
+        asyncio.ensure_future(self._trigger_token_when_finished(local_token))
+        return await wait_with_token(future, token=local_token)
 
     @property
     def is_finished(self) -> bool:

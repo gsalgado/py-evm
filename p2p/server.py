@@ -51,6 +51,7 @@ from p2p.peer import (
     BasePeer,
     ETHPeer,
     PeerPool,
+    PreferredNodePeerPool,
 )
 from p2p.service import BaseService
 from p2p.sync import FullNodeSyncer
@@ -77,7 +78,7 @@ class Server(BaseService):
                  network_id: int,
                  min_peers: int = DEFAULT_MIN_PEERS,
                  peer_class: Type[BasePeer] = ETHPeer,
-                 peer_pool_class: Type[PeerPool] = PeerPool,
+                 peer_pool_class: Type[PeerPool] = PreferredNodePeerPool,
                  bootstrap_nodes: Tuple[Node, ...] = None,
                  token: CancelToken = None,
                  ) -> None:
@@ -369,9 +370,10 @@ class Server(BaseService):
 
 def _test() -> None:
     import argparse
+    from pathlib import Path
     import signal
 
-    from evm.db.backends.memory import MemoryDB
+    from evm.db.backends.level import LevelDB
     from evm.chains.ropsten import RopstenChain, ROPSTEN_GENESIS_HEADER
 
     from p2p import ecies
@@ -383,6 +385,7 @@ def _test() -> None:
     from tests.p2p.integration_test_helpers import FakeAsyncChainDB, FakeAsyncRopstenChain
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('-db', type=str, required=True)
     parser.add_argument('-debug', action="store_true")
     parser.add_argument('-bootnodes', type=str, default=[])
     parser.add_argument('-nodekey', type=str)
@@ -397,7 +400,7 @@ def _test() -> None:
     logging.getLogger('p2p.server.Server').setLevel(log_level)
 
     loop = asyncio.get_event_loop()
-    db = MemoryDB()
+    db = LevelDB(args.db)
     headerdb = FakeAsyncHeaderDB(db)
     chaindb = FakeAsyncChainDB(db)
     chaindb.persist_header(ROPSTEN_GENESIS_HEADER)
@@ -407,7 +410,7 @@ def _test() -> None:
     # may try to establish a connection using the pubkey from one of our previous runs, which will
     # result in lots of DecryptionErrors in receive_handshake().
     if args.nodekey:
-        privkey = load_nodekey(args.nodekey)
+        privkey = load_nodekey(Path(args.nodekey))
     else:
         privkey = ecies.generate_privkey()
 
@@ -425,7 +428,9 @@ def _test() -> None:
         headerdb,
         db,
         RopstenChain.network_id,
+        min_peers=80,
         peer_class=ETHPeer,
+        peer_pool_class=PeerPool,
         bootstrap_nodes=bootstrap_nodes,
     )
 
@@ -438,7 +443,7 @@ def _test() -> None:
         await server.cancel()
         loop.stop()
 
-    loop.set_debug(True)
+    # loop.set_debug(True)
     asyncio.ensure_future(exit_on_sigint())
     asyncio.ensure_future(server.run())
     loop.run_forever()

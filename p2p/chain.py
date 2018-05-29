@@ -94,7 +94,6 @@ class FastChainSyncer(BaseService, PeerPoolSubscriber):
 
     async def handle_peer(self, peer: ETHPeer) -> None:
         """Handle the lifecycle of the given peer."""
-        self._running_peers.add(peer)
         # Use a local token that we'll trigger to cleanly cancel the _handle_peer() sub-tasks when
         # self.finished is set.
         peer_token = self.cancel_token.chain(CancelToken("HandlePeer"))
@@ -104,9 +103,11 @@ class FastChainSyncer(BaseService, PeerPoolSubscriber):
                 return_when=asyncio.FIRST_COMPLETED)
         finally:
             peer_token.trigger()
-            self._running_peers.remove(peer)
 
     async def _handle_peer(self, peer: ETHPeer, token: CancelToken) -> None:
+        # XXX: There might be a bug here... When a peer disconnects we're probably going to hang
+        # forever in peer.read_sub_proto_msg() and never return. Maybe the peer should close the
+        # sub-proto-msg queue when disconnecting?
         while not self.is_finished:
             try:
                 cmd, msg = await peer.read_sub_proto_msg(token)
@@ -163,10 +164,10 @@ class FastChainSyncer(BaseService, PeerPoolSubscriber):
             self.logger.debug(
                 "Got a NewBlock or a new peer, but already syncing so doing nothing")
             return
-        elif len(self._running_peers) < self.min_peers_to_sync:
+        elif len(self.peer_pool.peers) < self.min_peers_to_sync:
             self.logger.info(
                 "Connected to less peers (%d) than the minimum (%d) required to sync, "
-                "doing nothing", len(self._running_peers), self.min_peers_to_sync)
+                "doing nothing", len(self.peer_pool.peers), self.min_peers_to_sync)
             return
 
         self._syncing = True
@@ -670,10 +671,10 @@ def _test() -> None:
     if args.local_geth:
         peer_pool = LocalGethPeerPool(ETHPeer, headerdb, RopstenChain.network_id, privkey)
     else:
-        from p2p.peer import HardCodedNodesPeerPool
+        from p2p.peer import PreferredNodePeerPool
         discovery = None
         min_peers = 5
-        peer_pool = HardCodedNodesPeerPool(
+        peer_pool = PreferredNodePeerPool(
             peer_class=ETHPeer,
             headerdb=headerdb,
             network_id=RopstenChain.network_id,

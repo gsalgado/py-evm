@@ -237,7 +237,7 @@ class BasePeer(BaseService):
         Raises OperationCancelled if the peer has been disconnected.
         """
         combined_token = self.cancel_token.chain(cancel_token)
-        return await wait_with_token(self.sub_proto_msg_queue.get(), token=combined_token)
+        return await self.wait_unless_finished(self.sub_proto_msg_queue.get(), combined_token)
 
     @property
     async def genesis(self) -> BlockHeader:
@@ -844,9 +844,8 @@ class PeerPool(BaseService):
             self.logger.info("Connected peers: %d inbound, %d outbound",
                              inbound_peers, (len(self.connected_nodes) - inbound_peers))
             try:
-                await wait_with_token(
+                await self.wait_unless_finished(
                     asyncio.sleep(self._report_interval),
-                    self.finished.wait(),
                     token=self.cancel_token)
             except OperationCancelled:
                 break

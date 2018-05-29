@@ -2,13 +2,15 @@ import asyncio
 
 import pytest
 
+from p2p.cancel_token import CancelToken
+from p2p import eth
 from p2p.les import (
     LESProtocol,
     LESProtocolV2,
 )
-from p2p.exceptions import NoMatchingPeerCapabilities
-from p2p.peer import LESPeer
-from p2p.p2p_proto import P2PProtocol
+from p2p.exceptions import NoMatchingPeerCapabilities, OperationCancelled
+from p2p.peer import ETHPeer, LESPeer
+from p2p.p2p_proto import DisconnectReason, P2PProtocol
 
 from peer_helpers import (
     get_directly_linked_peers_without_handshake,
@@ -33,6 +35,20 @@ async def test_les_handshake():
 
     assert isinstance(peer1.sub_proto, LESProtocol)
     assert isinstance(peer2.sub_proto, LESProtocol)
+
+
+@pytest.mark.asyncio
+async def test_read_sub_proto_msg(request, event_loop):
+    peer1, peer2 = await get_directly_linked_peers(
+        request, event_loop, peer1_class=ETHPeer, peer2_class=ETHPeer)
+    peer1.sub_proto.send_get_block_headers(0, 1)
+
+    cmd, msg = await asyncio.wait_for(peer2.read_sub_proto_msg(CancelToken("")), timeout=1)
+    assert isinstance(cmd, eth.GetBlockHeaders)
+
+    peer1.disconnect(DisconnectReason.other)
+    with pytest.raises(OperationCancelled):
+        await asyncio.wait_for(peer2.read_sub_proto_msg(CancelToken("")), timeout=1)
 
 
 def test_sub_protocol_selection():
