@@ -98,23 +98,35 @@ class FastChainSyncer(BaseService, PeerPoolSubscriber):
         # self.finished is set.
         peer_token = self.cancel_token.chain(CancelToken("HandlePeer"))
         try:
-            await asyncio.wait(
+            # So, the difference between this and the new code is that this one didn't cancel the
+            # _handle_peer() task when finished got set, but the new one does because it uses
+            # wait_with_token(). With the change below, the test fails as well
+            _, pending = await asyncio.wait(
                 [self._handle_peer(peer, peer_token), self.finished.wait()],
                 return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
         finally:
             peer_token.trigger()
 
+    # async def handle_peer(self, peer: ETHPeer) -> None:
     async def _handle_peer(self, peer: ETHPeer, token: CancelToken) -> None:
-        # XXX: There might be a bug here... When a peer disconnects we're probably going to hang
-        # forever in peer.read_sub_proto_msg() and never return. Maybe the peer should close the
-        # sub-proto-msg queue when disconnecting?
+        # Use a local token that we'll trigger to cleanly cancel the read_sub_proto_msg()
+        # sub-task when self.finished is set.
+        peer_token = self.cancel_token.chain(CancelToken("HandlePeer"))
         while not self.is_finished:
             try:
                 cmd, msg = await peer.read_sub_proto_msg(token)
+                # cmd, msg = await self.wait_unless_finished(
+                #     peer.read_sub_proto_msg(self.cancel_token), self.cancel_token)
             except OperationCancelled:
                 # Either our cancel token or the peer's has been triggered, so break out of the
                 # loop.
+                peer_token.trigger()
                 break
+            except:  # noqa: E722
+                peer_token.trigger()
+                raise
 
             pending_msgs = peer.sub_proto_msg_queue.qsize()
             if pending_msgs:
