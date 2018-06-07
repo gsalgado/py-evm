@@ -114,6 +114,10 @@ class Command:
         return header, body
 
 
+# chunked-0: rlp.list(protocol-type, sequence-id, total-packet-size)
+header_data_sedes = rlp.sedes.List([rlp.sedes.big_endian_int] * 3, strict=False)
+
+
 class Protocol:
     logger = logging.getLogger("p2p.protocol.Protocol")
     name: str = None

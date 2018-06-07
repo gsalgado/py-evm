@@ -23,14 +23,13 @@ from evm.db.backends.base import BaseDB
 from evm.db.chain import AsyncChainDB
 
 from p2p.auth import (
-    decode_authentication,
+    decode_auth_message,
     HandshakeResponder,
 )
 from p2p.cancel_token import (
     CancelToken,
 )
 from p2p.constants import (
-    ENCRYPTED_AUTH_MSG_LEN,
     DEFAULT_MAX_PEERS,
     HASH_LEN,
     REPLY_TIMEOUT,
@@ -294,29 +293,21 @@ class Server(BaseService):
 
     async def _receive_handshake(
             self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        msg = await self.wait(
-            reader.read(ENCRYPTED_AUTH_MSG_LEN),
+        msg_size = await self.wait(
+            reader.read(2),
             timeout=REPLY_TIMEOUT)
-
+        auth_msg = await self.wait(
+            reader.read(big_endian_to_int(msg_size)),
+            timeout=REPLY_TIMEOUT)
         ip, socket, *_ = writer.get_extra_info("peername")
         remote_address = Address(ip, socket)
         self.logger.debug("Receiving handshake from %s", remote_address)
         try:
-            ephem_pubkey, initiator_nonce, initiator_pubkey = decode_authentication(
-                msg, self.privkey)
-        except DecryptionError:
-            # Try to decode as EIP8
-            msg_size = big_endian_to_int(msg[:2])
-            remaining_bytes = msg_size - ENCRYPTED_AUTH_MSG_LEN + 2
-            msg += await self.wait(
-                reader.read(remaining_bytes),
-                timeout=REPLY_TIMEOUT)
-            try:
-                ephem_pubkey, initiator_nonce, initiator_pubkey = decode_authentication(
-                    msg, self.privkey)
-            except DecryptionError as e:
-                self.logger.debug("Failed to decrypt handshake: %s", e)
-                return
+            ephem_pubkey, initiator_nonce, initiator_pubkey = decode_auth_message(
+                auth_msg, msg_size, self.privkey)
+        except DecryptionError as e:
+            self.logger.debug("Failed to decrypt handshake: %s", e)
+            return
 
         # Create `HandshakeResponder(remote: kademlia.Node, privkey: datatypes.PrivateKey)` instance
         initiator_remote = Node(initiator_pubkey, remote_address)
@@ -336,7 +327,7 @@ class Server(BaseService):
             initiator_nonce=initiator_nonce,
             responder_nonce=responder_nonce,
             remote_ephemeral_pubkey=ephem_pubkey,
-            auth_init_ciphertext=msg,
+            auth_init_ciphertext=msg_size + auth_msg,
             auth_ack_ciphertext=auth_ack_ciphertext
         )
 
@@ -403,6 +394,7 @@ def _test() -> None:
     if args.debug:
         log_level = logging.DEBUG
     logging.getLogger('p2p.server.Server').setLevel(log_level)
+    logging.getLogger('p2p').setLevel(log_level)
 
     loop = asyncio.get_event_loop()
     db = LevelDB(args.db)
@@ -447,7 +439,7 @@ def _test() -> None:
         await server.cancel()
         loop.stop()
 
-    loop.set_debug(True)
+    # loop.set_debug(True)
     asyncio.ensure_future(exit_on_sigint())
     asyncio.ensure_future(server.run())
     loop.run_forever()

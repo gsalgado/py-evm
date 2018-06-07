@@ -979,7 +979,7 @@ def _test():
         # (https://ropsten.etherscan.io/block/2440319), just as a basic test.
         nonlocal peer_pool
         while not peer_pool.peers:
-            peer_pool.logger.info("Waiting for peer connection...")
+            # peer_pool.logger.info("Waiting for peer connection...")
             await asyncio.sleep(0.2)
         peer = peer_pool.peers[0]
         block_hash = decode_hex(
@@ -1008,7 +1008,7 @@ def _test():
     asyncio.ensure_future(exit_on_sigint())
     asyncio.ensure_future(request_stuff())
     asyncio.ensure_future(peer_pool.run())
-    loop.set_debug(True)
+    # loop.set_debug(True)
     loop.run_forever()
     loop.close()
 

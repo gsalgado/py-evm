@@ -89,6 +89,7 @@ class P2PProtocol(Protocol):
                     capabilities=self.peer.capabilities,
                     listen_port=self.peer.listen_port,
                     remote_pubkey=self.peer.privkey.public_key.to_bytes())
+        self.logger.debug("Sending P2P/Hello msg: %s", data)
         header, body = Hello(self.cmd_id_offset).encode(data)
         self.send(header, body)
 

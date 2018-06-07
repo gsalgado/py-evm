@@ -4,6 +4,8 @@ from typing import List
 
 from eth_hash.auto import keccak
 
+from eth_utils import big_endian_to_int
+
 from evm.chains.mainnet import MAINNET_GENESIS_HEADER
 from evm.db.backends.memory import MemoryDB
 
@@ -13,7 +15,7 @@ from p2p import ecies
 from p2p import kademlia
 from p2p.cancel_token import CancelToken
 from p2p.peer import BasePeer, LESPeer, PeerPool
-from p2p.server import decode_authentication
+from p2p.server import decode_auth_message
 
 from integration_test_helpers import FakeAsyncHeaderDB
 
@@ -51,12 +53,14 @@ async def get_directly_linked_peers_without_handshake(
         "mock-streamwriter",
         (object,),
         {"write": peer1_reader.feed_data,
+         "drain": mock_drain,
          "close": lambda: None}
     )
     peer1_writer = type(
         "mock-streamwriter",
         (object,),
         {"write": peer2_reader.feed_data,
+         "drain": mock_drain,
          "close": lambda: None}
     )
 
@@ -79,10 +83,11 @@ async def get_directly_linked_peers_without_handshake(
     asyncio.ensure_future(do_handshake())
 
     responder = auth.HandshakeResponder(peer2_remote, peer2_private_key, cancel_token)
-    auth_cipher = await peer2_reader.read(constants.ENCRYPTED_AUTH_MSG_LEN)
+    auth_msg_size = await peer2_reader.read(2)
+    auth_msg = await peer2_reader.read(big_endian_to_int(auth_msg_size))
 
-    initiator_ephemeral_pubkey, initiator_nonce, _ = decode_authentication(
-        auth_cipher, peer2_private_key)
+    initiator_ephemeral_pubkey, initiator_nonce, _ = decode_auth_message(
+        auth_msg, auth_msg_size, peer2_private_key)
     responder_nonce = keccak(os.urandom(constants.HASH_LEN))
     auth_ack_msg = responder.create_auth_ack_message(responder_nonce)
     auth_ack_ciphertext = responder.encrypt_auth_ack_message(auth_ack_msg)
@@ -92,7 +97,7 @@ async def get_directly_linked_peers_without_handshake(
 
     aes_secret, mac_secret, egress_mac, ingress_mac = responder.derive_secrets(
         initiator_nonce, responder_nonce, initiator_ephemeral_pubkey,
-        auth_cipher, auth_ack_ciphertext)
+        auth_msg_size + auth_msg, auth_ack_ciphertext)
     assert egress_mac.digest() == peer1.ingress_mac.digest()
     assert ingress_mac.digest() == peer1.egress_mac.digest()
     peer2 = peer2_class(
@@ -133,6 +138,10 @@ async def get_directly_linked_peers(
     request.addfinalizer(finalizer)
 
     return peer1, peer2
+
+
+async def mock_drain():
+    pass
 
 
 class MockPeerPoolWithConnectedPeers(PeerPool):
