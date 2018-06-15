@@ -236,6 +236,7 @@ class LightPeerChain(PeerPoolSubscriber, BaseService):
         :return: the block number of the new tip after importing the header
         """
         new_tip = None
+        self.profiler.enable()
         for header in headers:
             try:
                 await self._validate_header(header)
@@ -248,7 +249,16 @@ class LightPeerChain(PeerPoolSubscriber, BaseService):
             else:
                 await self.wait(self.headerdb.coro_persist_header(header))
                 new_tip = header.block_number
+
+        self.profiler.disable()
+        import pstats
+        stats = pstats.Stats(self.profiler)
+        # stats.dump_stats('validate-header-stats.txt')
+        stats.strip_dirs().sort_stats('cumulative').print_stats(10)
         return new_tip
+
+    import cProfile
+    profiler = cProfile.Profile()
 
     async def _validate_header(self, header: BlockHeader) -> None:
         if header.is_genesis:
