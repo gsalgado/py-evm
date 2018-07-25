@@ -10,7 +10,7 @@ from typing import (
     TYPE_CHECKING,
 )
 
-from cytoolz.itertoolz import partition_all
+from cytoolz import dicttoolz, itertoolz
 
 import rlp
 
@@ -97,7 +97,7 @@ class StateDownloader(BaseService, PeerSubscriber):
     async def _handle_msg_loop(self) -> None:
         while self.is_running:
             try:
-                peer, cmd, msg = await self.wait_first(self.msg_queue.get())
+                peer, cmd, msg = await self.wait(self.msg_queue.get())
             except OperationCancelled:
                 break
 
@@ -124,7 +124,11 @@ class StateDownloader(BaseService, PeerSubscriber):
                 self._peers_with_pending_requests.pop(peer)
 
             node_keys = await loop.run_in_executor(self._executor, list, map(keccak, msg))
-            for node_key, node in zip(node_keys, msg):
+            # If we removed items from self._pending_nodes in the processing loop below, the retry
+            # coroutine could kick in before we've finished and retry the nodes we haven't gotten
+            # to yet, so we first pop all received node keys from self._pending_nodes.
+            self._pending_nodes = dicttoolz.dissoc(self._pending_nodes, *node_keys)
+            for idx, (node_key, node) in enumerate(zip(node_keys, msg)):
                 self._total_processed_nodes += 1
                 try:
                     self.scheduler.process([(node_key, node)])
@@ -132,8 +136,11 @@ class StateDownloader(BaseService, PeerSubscriber):
                     # This means we received a node more than once, which can happen when we
                     # retry after a timeout.
                     pass
-                # A node may be received more than once, so pop() with a default value.
-                self._pending_nodes.pop(node_key, None)
+                if idx % 10 == 0:
+                    # XXX: This is a quick workaround for
+                    # https://github.com/ethereum/py-evm/issues/1074, which will be replaced soon
+                    # with a proper fix.
+                    await self.wait(asyncio.sleep(0))
         elif isinstance(cmd, eth.GetBlockHeaders):
             await self._handle_get_block_headers(peer, cast(Dict[str, Any], msg))
         elif isinstance(cmd, eth.GetBlockBodies):
@@ -162,7 +169,7 @@ class StateDownloader(BaseService, PeerSubscriber):
         await asyncio.sleep(0)
 
     async def request_nodes(self, node_keys: List[bytes]) -> None:
-        batches = list(partition_all(eth.MAX_STATE_FETCH, node_keys))
+        batches = list(itertoolz.partition_all(eth.MAX_STATE_FETCH, node_keys))
         for batch in batches:
             peer = await self.get_idle_peer()
             now = time.time()
@@ -201,7 +208,7 @@ class StateDownloader(BaseService, PeerSubscriber):
             now = time.time()
             sleep_duration = (oldest_request_time + self._reply_timeout) - now
             try:
-                await self.wait_first(asyncio.sleep(sleep_duration))
+                await self.wait(asyncio.sleep(sleep_duration))
             except OperationCancelled:
                 break
 
@@ -220,7 +227,7 @@ class StateDownloader(BaseService, PeerSubscriber):
                 # This ensures we yield control and give _handle_msg() a chance to process any nodes
                 # we may have received already, also ensuring we exit when our cancel token is
                 # triggered.
-                await self.wait_first(asyncio.sleep(0))
+                await self.wait(asyncio.sleep(0))
 
                 requests = self.scheduler.next_batch(eth.MAX_STATE_FETCH)
                 if not requests:
@@ -229,7 +236,7 @@ class StateDownloader(BaseService, PeerSubscriber):
                     # pending nodes take a while to arrive thus causing the scheduler to run out
                     # of new requests for a while.
                     self.logger.debug("Scheduler queue is empty, sleeping a bit")
-                    await self.wait_first(asyncio.sleep(0.5))
+                    await self.wait(asyncio.sleep(0.5))
                     continue
 
                 await self.request_nodes([request.node_key for request in requests])
@@ -249,7 +256,7 @@ class StateDownloader(BaseService, PeerSubscriber):
                 "Nodes scheduled but not requested yet: %d", len(self.scheduler.requests))
             self.logger.info("Total nodes timed out: %d", self._total_timeouts)
             try:
-                await self.wait_first(asyncio.sleep(self._report_interval))
+                await self.wait(asyncio.sleep(self._report_interval))
             except OperationCancelled:
                 break
 
