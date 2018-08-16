@@ -2,12 +2,15 @@ from abc import ABC, abstractmethod
 import asyncio
 import functools
 import logging
+import time
 from typing import (
     Any,
     Awaitable,
     Callable,
+    Dict,
     List,
     Optional,
+    Set,
     cast,
 )
 from weakref import WeakSet
@@ -31,10 +34,11 @@ class ServiceEvents:
 
 class BaseService(ABC, CancellableMixin):
     logger: TraceLogger = None
-    _child_services: List['BaseService']
+    _child_services: Set['BaseService']
     # Use a WeakSet so that we don't have to bother updating it when tasks finish.
     _tasks: 'WeakSet[asyncio.Future[Any]]'
     _finished_callbacks: List[Callable[['BaseService'], None]]
+    _finished_child_services: 'asyncio.Queue[BaseService]'
     # Number of seconds cancel() will wait for run() to finish.
     _wait_until_finished_timeout = 5
 
@@ -48,7 +52,8 @@ class BaseService(ABC, CancellableMixin):
                  loop: asyncio.AbstractEventLoop = None) -> None:
         self.events = ServiceEvents()
         self._run_lock = asyncio.Lock()
-        self._child_services = []
+        self._child_services = set()
+        self._finished_child_services = asyncio.Queue(loop=loop)
         self._tasks = WeakSet()
         self._finished_callbacks = []
 
@@ -97,6 +102,7 @@ class BaseService(ABC, CancellableMixin):
         try:
             async with self._run_lock:
                 self.events.started.set()
+                self.run_task(self._restart_finished_children())
                 await self._run()
         except OperationCancelled as e:
             self.logger.debug("%s finished: %s", self, e)
@@ -136,9 +142,34 @@ class BaseService(ABC, CancellableMixin):
     def run_child_service(self, child_service: 'BaseService') -> None:
         """
         Run a child service and keep a reference to it to be considered during the cleanup.
+
+        If the child service finishes while we're still running, it will be restarted.
         """
-        self._child_services.append(child_service)
-        self.run_task(child_service.run())
+        self._child_services.add(child_service)
+
+        async def f() -> None:
+            try:
+                await child_service.run()
+            finally:
+                self._finished_child_services.put_nowait(child_service)
+
+        self.run_task(f())
+
+    async def _restart_finished_children(self) -> None:
+        restart_times: Dict[BaseService, List[float]] = {}
+        while self.is_running:
+            child = await self.wait(self._finished_child_services.get())
+            child_restart_times = restart_times.setdefault(child, [])
+            one_min_ago = time.time() - 60
+            if child_restart_times and max(child_restart_times) > one_min_ago:
+                self.logger.warning(
+                    "Child service %s finished unexpectedly but was restarted less "
+                    "than one minute ago, not restarting again", child)
+            else:
+                child_restart_times.append(time.time())
+                self.logger.info("Child service %s finished unexpectedly, restarting it", child)
+                child.cancel_token.reset()
+                self.run_child_service(child)
 
     async def _run_in_executor(self, callback: Callable[..., Any], *args: Any) -> Any:
         loop = self.get_event_loop()
